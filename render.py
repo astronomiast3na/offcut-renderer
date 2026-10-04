@@ -4,7 +4,7 @@ Offcut shorts renderer.
 Reads a shorts package (JSON from the Make "Offcut — Shorts Writer" scenario),
 and for each short:
   1. records the voiceover per scene with Kokoro (free, open-source TTS)
-  2. finds matching vertical stock footage on Pexels (free API)
+  2. finds matching stock footage on Pixabay (free API), cropped to vertical
   3. builds 1080x1920 scene clips with FFmpeg
   4. burns in big, bold captions
   5. writes out/<slug>.mp4
@@ -14,7 +14,7 @@ Input comes from (in order):
   - the file given as the first command-line argument (for manual tests).
 
 Environment variables:
-  PEXELS_API_KEY   required
+  PIXABAY_API_KEY  required
   VOICE            optional, Kokoro voice (default: am_michael)
   SPEED            optional, speech speed (default: 1.05)
 """
@@ -90,35 +90,34 @@ def tts(text: str) -> np.ndarray:
 
 # ---------------------------------------------------------------- footage
 
-def pexels_search(query: str, used: set) -> str | None:
-    key = os.environ["PEXELS_API_KEY"]
+def pixabay_search(query: str, used: set) -> str | None:
+    key = os.environ["PIXABAY_API_KEY"]
     r = requests.get(
-        "https://api.pexels.com/videos/search",
-        params={"query": query, "orientation": "portrait", "per_page": 15, "size": "medium"},
-        headers={"Authorization": key},
+        "https://pixabay.com/api/videos/",
+        params={"key": key, "q": query[:100], "per_page": 20, "safesearch": "true"},
         timeout=30,
     )
     r.raise_for_status()
-    videos = [v for v in r.json().get("videos", []) if v["id"] not in used]
-    random.shuffle(videos)
-    for v in videos:
-        files = [f for f in v.get("video_files", [])
-                 if f.get("height") and f.get("width") and f["height"] >= f["width"]
-                 and f["height"] >= 1280 and f.get("file_type") == "video/mp4"]
-        if not files:
-            continue
-        best = min(files, key=lambda f: abs(f["height"] - H))
-        used.add(v["id"])
-        return best["link"]
+    hits = [h for h in r.json().get("hits", []) if h["id"] not in used]
+    random.shuffle(hits)
+    # prefer portrait clips, then the rest (landscape gets centre-cropped)
+    hits.sort(key=lambda h: 0 if h["videos"].get("medium", {}).get("height", 0)
+              >= h["videos"].get("medium", {}).get("width", 1) else 1)
+    for h in hits:
+        for size in ("large", "medium", "small"):
+            f = h.get("videos", {}).get(size) or {}
+            if f.get("url") and min(f.get("width", 0), f.get("height", 0)) >= 720:
+                used.add(h["id"])
+                return f["url"]
     return None
 
 
 def get_footage(query: str, used: set, dest: Path) -> Path:
     for q in [query] + FALLBACK_SEARCHES:
         try:
-            link = pexels_search(q, used)
+            link = pixabay_search(q, used)
         except requests.RequestException as e:
-            print(f"  Pexels error for '{q}': {e}")
+            print(f"  Pixabay error for '{q}': {e}")
             link = None
         if link:
             with requests.get(link, stream=True, timeout=120) as resp:
