@@ -270,7 +270,9 @@ def render_short(short: dict, idx: int) -> Path:
     V.brand_overlay(brand)
 
     OUT.mkdir(exist_ok=True)
-    final = OUT / f"{slug}.mp4"
+    run_no = os.environ.get("GITHUB_RUN_NUMBER")
+    file_name = f"{slug}-{run_no}.mp4" if run_no else f"{slug}.mp4"  # unique name per run
+    final = OUT / file_name
     fonts_dir = Path(V.__file__).parent / "fonts"
     ass = f"ass={subs}" + (f":fontsdir={fonts_dir}" if fonts_dir.exists() else "")
     graph = (f"[0:v][2:v]overlay=0:0[b];"
@@ -283,6 +285,7 @@ def render_short(short: dict, idx: int) -> Path:
          "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(final)])
     print(f"  done: {final} ({t:.1f}s, {final.stat().st_size / 1e6:.1f} MB)")
     short["_slug"] = slug
+    short["_file"] = file_name
     short["_seconds"] = round(t, 1)
     return final
 
@@ -302,7 +305,7 @@ def main():
         "shorts": [
             {
                 "slug": s["_slug"],
-                "file": f"{s['_slug']}.mp4",
+                "file": s["_file"],
                 "title": s.get("title", ""),
                 "caption": s.get("caption", ""),
                 "hashtags": s.get("hashtags", []),
