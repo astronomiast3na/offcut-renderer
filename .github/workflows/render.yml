@@ -42,7 +42,7 @@ jobs:
 
       - name: Render shorts
         env:
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           VOICE: ${{ vars.VOICE || 'am_michael' }}
           SPEED: ${{ vars.SPEED || '1.05' }}
         run: python render.py sample_shorts.json
