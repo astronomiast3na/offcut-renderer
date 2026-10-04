@@ -22,7 +22,16 @@ jobs:
       - name: Install system tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg espeak-ng fonts-dejavu-core
+          sudo apt-get install -y -qq ffmpeg espeak-ng fonts-dejavu-core fonts-noto-color-emoji
+
+      - name: Get Montserrat font
+        run: |
+          mkdir -p fonts
+          for f in ExtraBold SemiBold; do
+            curl -sSfL -o "fonts/Montserrat-$f.ttf" \
+              "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-$f.ttf" || rm -f "fonts/Montserrat-$f.ttf"
+          done
+          ls -la fonts
 
       - uses: actions/setup-python@v5
         with:
