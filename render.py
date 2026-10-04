@@ -4,8 +4,10 @@ Offcut shorts renderer.
 Reads a shorts package (JSON from the Make "Offcut — Shorts Writer" scenario),
 and for each short:
   1. records the voiceover per scene with Kokoro (free, open-source TTS)
-  2. finds matching stock footage on Pixabay (free API), cropped to vertical
-  3. builds 1080x1920 scene clips with FFmpeg
+  2. builds an animated, on-topic graphic for each scene (visuals.py): titles,
+     checklists, counting numbers, do/don't cards; about one scene in three uses
+     real stock footage from Pixabay (free API), cropped to vertical
+  3. joins the 1080x1920 scene clips with FFmpeg, adds the OFFCUT tag and a progress bar
   4. burns in big, bold captions
   5. writes out/<slug>.mp4
 
@@ -14,7 +16,7 @@ Input comes from (in order):
   - the file given as the first command-line argument (for manual tests).
 
 Environment variables:
-  PIXABAY_API_KEY  required
+  PIXABAY_API_KEY  optional (without it every scene is animated)
   VOICE            optional, Kokoro voice (default: am_michael)
   SPEED            optional, speech speed (default: 1.05)
 """
@@ -31,6 +33,8 @@ from pathlib import Path
 import numpy as np
 import requests
 import soundfile as sf
+
+import visuals as V
 
 SAMPLE_RATE = 24000
 W, H, FPS = 1080, 1920, 30
@@ -138,9 +142,9 @@ def run(cmd: list):
 
 def make_scene_clip(src: Path, duration: float, dest: Path):
     vf = (f"scale={W}:{H}:force_original_aspect_ratio=increase,"
-          f"crop={W}:{H},fps={FPS},setsar=1,format=yuv420p")
+          f"crop={W}:{H},fps={FPS},setsar=1,eq=brightness=-0.05:saturation=1.08,format=yuv420p")
     run(["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(src), "-t", f"{duration:.3f}",
-         "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(dest)])
+         "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", str(dest)])
 
 
 def ass_time(t: float) -> str:
@@ -152,6 +156,7 @@ def ass_time(t: float) -> str:
 
 def build_captions(scenes: list, path: Path):
     """Captions in 2-3 word bursts, timed by character share within each scene."""
+    font = V.caption_font_name()
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {W}
@@ -159,7 +164,7 @@ PlayResY: {H}
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,DejaVu Sans,86,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,2,80,80,620,1
+Style: Cap,{font},78,&H00FFFFFF,&H00FFFFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,7,3,2,80,80,450,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -189,21 +194,34 @@ def render_short(short: dict, idx: int) -> Path:
 
     gap = np.zeros(int(SAMPLE_RATE * SCENE_GAP), dtype=np.float32)
     audio_parts, scenes, t = [], [], 0.0
-    used_footage: set = set()
-    clip_paths = []
-
     for n, sc in enumerate(short["scenes"]):
         text = sc["text"].strip()
-        print(f"  scene {n}: {text[:60]}...")
+        print(f"  voice {n}: {text[:60]}...")
         audio = np.concatenate([tts(text), gap])
         dur = len(audio) / SAMPLE_RATE
         audio_parts.append(audio)
-        scenes.append({"text": text, "start": t, "duration": dur - SCENE_GAP})
+        scenes.append({"text": text, "start": t, "duration": dur - SCENE_GAP, "clip": dur,
+                       "search": sc.get("search"), "visual": sc.get("visual")})
         t += dur
 
-        raw = get_footage(sc.get("search") or "tradesman working", used_footage, wdir / f"raw{n}.mp4")
+    plans = V.plan_visuals(scenes)
+    used_footage: set = set()
+    clip_paths = []
+    for n, (sc, plan) in enumerate(zip(scenes, plans)):
         clip = wdir / f"clip{n}.mp4"
-        make_scene_clip(raw, dur, clip)
+        print(f"  scene {n}: {plan['type']}")
+        if plan["type"] == "footage":
+            try:
+                if not os.environ.get("PIXABAY_API_KEY"):
+                    raise RuntimeError("no PIXABAY_API_KEY")
+                raw = get_footage(plan.get("search") or "tradesman working", used_footage, wdir / f"raw{n}.mp4")
+                make_scene_clip(raw, sc["clip"], clip)
+                clip_paths.append(clip)
+                continue
+            except Exception as e:  # never let footage break a render
+                print(f"    footage unavailable ({e}); animating instead")
+                plan = {"type": "statement", "text": V.headline(sc["text"])}
+        V.render_animated(plan, sc, sc["clip"], clip)
         clip_paths.append(clip)
 
     wav = wdir / "voice.wav"
@@ -211,16 +229,22 @@ def render_short(short: dict, idx: int) -> Path:
 
     concat_list = wdir / "list.txt"
     concat_list.write_text("".join(f"file '{p.resolve()}'\n" for p in clip_paths), encoding="utf-8")
-    silent = wdir / "silent.mp4"
-    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-c", "copy", str(silent)])
-
     subs = wdir / "subs.ass"
     build_captions(scenes, subs)
+    brand = wdir / "brand.png"
+    V.brand_overlay(brand)
 
     OUT.mkdir(exist_ok=True)
     final = OUT / f"{slug}.mp4"
-    run(["ffmpeg", "-y", "-i", str(silent), "-i", str(wav),
-         "-vf", f"ass={subs}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+    fonts_dir = Path(V.__file__).parent / "fonts"
+    ass = f"ass={subs}" + (f":fontsdir={fonts_dir}" if fonts_dir.exists() else "")
+    graph = (f"[0:v][2:v]overlay=0:0[b];"
+             f"[b][3:v]overlay=x='-w+w*t/{t:.3f}':y=0:shortest=1[p];"
+             f"[p]{ass}[v]")
+    run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_list), "-i", str(wav),
+         "-i", str(brand), "-f", "lavfi", "-i", f"color=c=0xFF7A1A:s={W}x12:r={FPS}",
+         "-filter_complex", graph, "-map", "[v]", "-map", "1:a",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-pix_fmt", "yuv420p",
          "-c:a", "aac", "-b:a", "160k", "-shortest", "-movflags", "+faststart", str(final)])
     print(f"  done: {final} ({t:.1f}s, {final.stat().st_size / 1e6:.1f} MB)")
     short["_slug"] = slug
