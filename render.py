@@ -41,7 +41,7 @@ W, H, FPS = 1080, 1920, 30
 SCENE_GAP = 0.15  # seconds of silence between scenes
 OUT = Path("out")
 WORK = Path("work")
-FALLBACK_SEARCHES = ["construction worker", "tradesman working", "tools workshop", "building site"]
+FALLBACK_SEARCHES = ["construction worker", "carpenter working", "power tools workshop", "building construction site"]
 
 
 # ---------------------------------------------------------------- input
@@ -94,24 +94,59 @@ def tts(text: str) -> np.ndarray:
 
 # ---------------------------------------------------------------- footage
 
+OFF_TOPIC_TAGS = {
+    "bird", "birds", "animal", "animals", "wildlife", "dog", "dogs", "cat", "cats", "horse", "cow",
+    "insect", "bee", "butterfly", "flower", "flowers", "nature", "forest", "tree", "trees", "sea",
+    "ocean", "beach", "fish", "woodpecker", "squirrel", "sunset", "sunrise", "sky", "clouds",
+    "waterfall", "mountain", "mountains", "lake", "river", "wedding", "party", "dance", "fashion",
+    "model", "christmas", "abstract", "background", "particles", "space", "galaxy", "cartoon",
+}
+QUERY_STOP = {"the", "and", "for", "with", "man", "men", "woman", "person", "people", "closeup", "close", "up"}
+
+
+def _words(text: str) -> list:
+    return re.findall(r"[a-z]+", text.lower())
+
+
+def _relevance(query_words: list, tags: set) -> int:
+    """How many search words show up in the clip's tags (prefix match, so 'measuring' ~ 'measure')."""
+    score = 0
+    for q in query_words:
+        if any(t.startswith(q[:5]) or q.startswith(t[:5]) for t in tags if len(t) > 2):
+            score += 1
+    return score
+
+
 def pixabay_search(query: str, used: set) -> str | None:
     key = os.environ["PIXABAY_API_KEY"]
     r = requests.get(
         "https://pixabay.com/api/videos/",
-        params={"key": key, "q": query[:100], "per_page": 20, "safesearch": "true"},
+        params={"key": key, "q": query[:100], "per_page": 50, "safesearch": "true"},
         timeout=30,
     )
     r.raise_for_status()
-    hits = [h for h in r.json().get("hits", []) if h["id"] not in used]
-    random.shuffle(hits)
-    # prefer portrait clips, then the rest (landscape gets centre-cropped)
-    hits.sort(key=lambda h: 0 if h["videos"].get("medium", {}).get("height", 0)
-              >= h["videos"].get("medium", {}).get("width", 1) else 1)
-    for h in hits:
+    q_words = [w for w in _words(query) if len(w) > 2 and w not in QUERY_STOP]
+    need = 2 if len(q_words) >= 3 else 1  # longer searches must match at least two words
+    ranked = []
+    for rank, h in enumerate(r.json().get("hits", [])):
+        if h["id"] in used:
+            continue
+        tags = set(_words(h.get("tags", "")))
+        if tags & OFF_TOPIC_TAGS:
+            continue  # birds, scenery and other off-topic clips
+        score = _relevance(q_words, tags)
+        if score < need:
+            continue
+        med = h.get("videos", {}).get("medium", {}) or {}
+        portrait = med.get("height", 0) >= med.get("width", 1)
+        ranked.append((-score, 0 if portrait else 1, rank, h))
+    ranked.sort(key=lambda x: x[:3])
+    for _, _, _, h in ranked:
         for size in ("large", "medium", "small"):
             f = h.get("videos", {}).get(size) or {}
             if f.get("url") and min(f.get("width", 0), f.get("height", 0)) >= 720:
                 used.add(h["id"])
+                print(f"    footage for '{query}': pixabay {h['id']} [{h.get('tags', '')}]")
                 return f["url"]
     return None
 
